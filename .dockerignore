@@ -1,0 +1,40 @@
+# What `docker build` may NOT read. Both images are built with the repository root as context,
+# so anything not excluded here can be copied into an image layer by a careless COPY.
+
+# Secrets: never in an image. (.env.example holds no values and is harmless.)
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+
+# Version control and tooling
+.git
+.github
+.claude
+.gitignore
+.gitleaks.toml
+
+# Local environments, dependencies and build output: always rebuilt inside the image
+.venv
+**/node_modules
+**/dist
+**/__pycache__
+**/*.pyc
+*.egg-info
+.pytest_cache
+.ruff_cache
+.mypy_cache
+
+# Not needed by any image
+docs
+notes
+playground
+tests
+volumes
+*.log
+*.md
+.DS_Store
+**/.DS_Store
+docker-compose*.yml
+Makefile

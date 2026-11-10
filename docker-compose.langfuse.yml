@@ -1,0 +1,206 @@
+# Self-hosted Langfuse v4: traces of every model call, plus datasets and evals.
+#
+# Included from docker-compose.yml, so `docker compose up -d` starts it with the rest. It shares
+# nothing with the other services except the network: the backend only needs to reach
+# http://langfuse-web:3000 with the project key pair. To run without it, remove the `include:`
+# block in docker-compose.yml.
+#
+# Based on https://github.com/langfuse/langfuse/blob/main/docker-compose.yml (2026-11-05), with
+# the services renamed langfuse-*, secrets taken from .env, no published ports except the UI,
+# and without the optional AI gateway.
+#
+# Memory. This is the heaviest part of the stack; the limits below fit a personal instance.
+# On a small server, in order of what to give up first:
+#   1. drop Langfuse entirely (see above); the app works the same, without traces
+#   2. lower the mem_limit values and LANGFUSE_NODE_HEAP_MB below
+#   3. replace langfuse-postgres with a `langfuse` database on the Supabase `db` service
+#      (saves one container, couples the two stacks)
+# ClickHouse, Redis and S3-compatible storage are hard requirements of Langfuse v3+ and
+# cannot be removed individually.
+
+x-langfuse-env: &langfuse-env
+  # URL of the UI as the browser sees it.
+  NEXTAUTH_URL: ${LANGFUSE_PUBLIC_URL:-http://localhost:3100}
+  DATABASE_URL: postgresql://postgres:${LANGFUSE_POSTGRES_PASSWORD:?run scripts/gen_secrets.py}@langfuse-postgres:5432/postgres
+  SALT: ${LANGFUSE_SALT:?run scripts/gen_secrets.py}
+  ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:?run scripts/gen_secrets.py}
+  # Anonymous usage statistics sent to Langfuse; off for a private instance.
+  TELEMETRY_ENABLED: "false"
+  # Cap the Node.js heap of the web and worker processes (megabytes).
+  NODE_OPTIONS: --max-old-space-size=${LANGFUSE_NODE_HEAP_MB:-768}
+  CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+  CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+  CLICKHOUSE_USER: clickhouse
+  CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:?run scripts/gen_secrets.py}
+  CLICKHOUSE_CLUSTER_ENABLED: "false"
+  REDIS_HOST: langfuse-redis
+  REDIS_PORT: 6379
+  REDIS_AUTH: ${LANGFUSE_REDIS_PASSWORD:?run scripts/gen_secrets.py}
+  # Incoming events are written to object storage first and to ClickHouse by the worker.
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_PASSWORD:?run scripts/gen_secrets.py}
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+  # Media attachments (images, audio in traces). The endpoint is internal, so uploads work from
+  # the backend containers but not from a browser; Lighthouse traces are text only.
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_PASSWORD}
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+
+x-langfuse-depends-on: &langfuse-depends-on
+  langfuse-postgres:
+    condition: service_healthy
+  langfuse-clickhouse:
+    condition: service_healthy
+  langfuse-redis:
+    condition: service_healthy
+  langfuse-minio:
+    condition: service_healthy
+
+services:
+  # UI and public API (the backend sends traces here). Runs the database migrations on start
+  # and, the first time, creates the organisation, project, API keys and login from
+  # LANGFUSE_INIT_* ("headless initialisation").
+  langfuse-web:
+    image: docker.langfuse.com/langfuse/langfuse:4.77.0
+    restart: unless-stopped
+    depends_on: *langfuse-depends-on
+    ports:
+      - ${BIND_ADDRESS:-127.0.0.1}:3100:3000
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:?run scripts/gen_secrets.py}
+      # Only the account below exists; nobody can register through the UI.
+      AUTH_DISABLE_SIGNUP: "true"
+      LANGFUSE_INIT_ORG_ID: lighthouse
+      LANGFUSE_INIT_ORG_NAME: Lighthouse
+      LANGFUSE_INIT_PROJECT_ID: lighthouse
+      LANGFUSE_INIT_PROJECT_NAME: lighthouse
+      # The same key pair the backend reads from .env, so tracing works without any clicking.
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:?run scripts/gen_secrets.py}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:?run scripts/gen_secrets.py}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-admin@lighthouse.local}
+      LANGFUSE_INIT_USER_NAME: admin
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:?run scripts/gen_secrets.py}
+    # Measured use is 600 to 900 MB.
+    mem_limit: 1536m
+    healthcheck:
+      # The server listens on the container's own address, not on 127.0.0.1. `$$` is a literal `$`
+      # for the shell in the container (a single `$` would be expanded by compose).
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://$$HOSTNAME:3000/api/public/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # Background jobs: moves events from object storage into ClickHouse, runs evals and exports.
+  langfuse-worker:
+    image: docker.langfuse.com/langfuse/langfuse-worker:4.77.0
+    restart: unless-stopped
+    depends_on: *langfuse-depends-on
+    environment:
+      <<: *langfuse-env
+    # Measured use is about 400 MB.
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://$$HOSTNAME:3030/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # Users, projects, API keys, prompts, dataset definitions.
+  langfuse-postgres:
+    image: docker.io/postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${LANGFUSE_POSTGRES_PASSWORD}
+      POSTGRES_DB: postgres
+      TZ: UTC
+      PGTZ: UTC
+    volumes:
+      - langfuse-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # Traces, observations and scores: the analytical store.
+  langfuse-clickhouse:
+    image: docker.io/clickhouse/clickhouse-server:26.3.62.3
+    restart: unless-stopped
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD}
+    volumes:
+      - langfuse-clickhouse-data:/var/lib/clickhouse
+      - langfuse-clickhouse-logs:/var/log/clickhouse-server
+      # Smaller caches and no internal profiling tables; see the file for details.
+      - ./infra/langfuse/clickhouse-low-memory.xml:/etc/clickhouse-server/config.d/low-memory.xml:ro
+    # ClickHouse reads this limit and keeps its own usage below 90% of it.
+    mem_limit: 2g
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+  # Job queues and caches.
+  langfuse-redis:
+    image: docker.io/redis:7
+    restart: unless-stopped
+    # noeviction is required by the job queue: a full Redis must refuse writes, not drop jobs.
+    command: ["--requirepass", "${LANGFUSE_REDIS_PASSWORD}", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
+    environment:
+      # Read by redis-cli in the healthcheck.
+      REDISCLI_AUTH: ${LANGFUSE_REDIS_PASSWORD}
+    volumes:
+      - langfuse-redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  # S3-compatible object storage for raw events and media. Upstream does not pin this image
+  # (Chainguard publishes only `latest` on its free tier).
+  langfuse-minio:
+    image: cgr.dev/chainguard/minio
+    restart: unless-stopped
+    entrypoint: sh
+    # Creates the `langfuse` bucket (a directory) before starting the server.
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: ${LANGFUSE_MINIO_PASSWORD}
+    volumes:
+      - langfuse-minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+      start_period: 1s
+
+volumes:
+  langfuse-postgres-data:
+  langfuse-clickhouse-data:
+  langfuse-clickhouse-logs:
+  langfuse-redis-data:
+  langfuse-minio-data:

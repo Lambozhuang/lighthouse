@@ -1,0 +1,169 @@
+@import 'tailwindcss';
+
+/*
+  Design tokens. One cool neutral ramp, one accent (a sea teal) and three status
+  colors. Tailwind's default palette is switched off so that every color in the
+  app comes from this list: `bg-canvas`, `text-muted`, `border-line` and so on.
+*/
+@theme {
+  --font-sans: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  --color-*: initial;
+  --color-canvas: oklch(0.995 0.002 220); /* page background */
+  --color-panel: oklch(0.968 0.005 220); /* sidebar, quiet fills */
+  --color-hover: oklch(0.935 0.008 220); /* hovered or selected rows */
+  --color-line: oklch(0.895 0.008 220); /* borders */
+  --color-ink: oklch(0.24 0.02 230); /* text */
+  --color-muted: oklch(0.47 0.02 230); /* secondary text */
+  --color-accent: oklch(0.47 0.085 205);
+  --color-accent-soft: oklch(0.94 0.03 205);
+  --color-on-accent: oklch(0.99 0.005 205); /* text on an accent fill */
+  --color-ok: oklch(0.48 0.11 150);
+  --color-warn: oklch(0.5 0.11 70);
+  --color-danger: oklch(0.52 0.18 27);
+  --color-scrim: oklch(0.2 0.02 230 / 0.45); /* dims the page behind a dialog or the drawer */
+}
+
+/* Dark values for the same tokens; components never mention the theme. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-canvas: oklch(0.19 0.01 230);
+    --color-panel: oklch(0.225 0.012 230);
+    --color-hover: oklch(0.285 0.014 230);
+    --color-line: oklch(0.35 0.014 230);
+    --color-ink: oklch(0.93 0.008 220);
+    --color-muted: oklch(0.71 0.015 225);
+    --color-accent: oklch(0.78 0.085 200);
+    --color-accent-soft: oklch(0.32 0.04 205);
+    --color-on-accent: oklch(0.2 0.02 220);
+    --color-ok: oklch(0.79 0.13 150);
+    --color-warn: oklch(0.82 0.12 80);
+    --color-danger: oklch(0.74 0.15 25);
+    --color-scrim: oklch(0.1 0.01 230 / 0.6);
+  }
+}
+
+@layer base {
+  :root {
+    color-scheme: light dark;
+  }
+
+  body {
+    background: var(--color-canvas);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: 0.9375rem;
+    line-height: 1.5;
+    /* Inter's contextual alternates turn "<=>" and "->" into arrows; notes are full of those. */
+    font-feature-settings: 'calt' 0;
+    -webkit-font-smoothing: antialiased;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+
+  ::placeholder {
+    color: var(--color-muted);
+    opacity: 0.8;
+  }
+
+  ::selection {
+    background: var(--color-accent-soft);
+  }
+
+  button:not(:disabled),
+  summary {
+    cursor: pointer;
+  }
+
+  dialog::backdrop {
+    background: var(--color-scrim);
+  }
+}
+
+@layer components {
+  /* Rendered markdown in assistant answers. */
+  .markdown {
+    line-height: 1.65;
+    overflow-wrap: anywhere;
+  }
+
+  .markdown > * + * {
+    margin-top: 0.8em;
+  }
+
+  .markdown :is(h1, h2, h3, h4) {
+    margin-top: 1.4em;
+    font-weight: 600;
+    line-height: 1.3;
+  }
+
+  .markdown > :first-child {
+    margin-top: 0;
+  }
+
+  .markdown h1 {
+    font-size: 1.25em;
+  }
+
+  .markdown h2 {
+    font-size: 1.125em;
+  }
+
+  .markdown ul {
+    list-style: disc;
+    padding-left: 1.4em;
+  }
+
+  .markdown ol {
+    list-style: decimal;
+    padding-left: 1.4em;
+  }
+
+  .markdown li + li,
+  .markdown li > :is(ul, ol) {
+    margin-top: 0.3em;
+  }
+
+  .markdown a {
+    color: var(--color-accent);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  .markdown code {
+    border-radius: 4px;
+    background: var(--color-panel);
+    padding: 0.1em 0.35em;
+    font-family: var(--font-mono);
+    font-size: 0.875em;
+  }
+
+  .markdown pre {
+    overflow-x: auto;
+    border: 1px solid var(--color-line);
+    border-radius: 6px;
+    background: var(--color-panel);
+    padding: 0.75rem 1rem;
+    line-height: 1.5;
+  }
+
+  .markdown pre code {
+    background: none;
+    padding: 0;
+  }
+
+  .markdown blockquote {
+    border-left: 2px solid var(--color-line);
+    padding-left: 1em;
+    color: var(--color-muted);
+  }
+
+  .markdown hr {
+    border-color: var(--color-line);
+  }
+}

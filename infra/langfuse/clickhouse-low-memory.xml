@@ -1,0 +1,36 @@
+<!--
+  ClickHouse settings for a small, single-user Langfuse instance.
+
+  Out of the box ClickHouse assumes a dedicated analytics server: multi-gigabyte caches and a
+  set of internal tables (system.*_log) that record profiling data every second. Neither is
+  useful for a handful of traces per day, and the log tables alone grow by gigabytes over time.
+  Langfuse does not read any of them.
+
+  Mounted into /etc/clickhouse-server/config.d/ by docker-compose.langfuse.yml; files there are
+  merged over the default config.xml. Delete the mount to go back to the defaults.
+-->
+<clickhouse>
+    <!-- Caches, in bytes. Defaults are 5 GiB (marks) and 8 GiB (uncompressed blocks). -->
+    <mark_cache_size>268435456</mark_cache_size>
+    <index_mark_cache_size>134217728</index_mark_cache_size>
+    <uncompressed_cache_size>134217728</uncompressed_cache_size>
+
+    <!-- Fewer queries at once means a lower peak. -->
+    <max_concurrent_queries>50</max_concurrent_queries>
+
+    <!-- Internal profiling and debugging tables that are not needed here. -->
+    <asynchronous_metric_log remove="1"/>
+    <metric_log remove="1"/>
+    <query_metric_log remove="1"/>
+    <latency_log remove="1"/>
+    <trace_log remove="1"/>
+    <text_log remove="1"/>
+    <query_thread_log remove="1"/>
+    <query_views_log remove="1"/>
+    <processors_profile_log remove="1"/>
+    <opentelemetry_span_log remove="1"/>
+    <asynchronous_insert_log remove="1"/>
+    <session_log remove="1"/>
+    <backup_log remove="1"/>
+    <blob_storage_log remove="1"/>
+</clickhouse>

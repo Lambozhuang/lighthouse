@@ -1,0 +1,123 @@
+# Kong declarative configuration: every route of the Supabase gateway, in one file.
+#
+# Trimmed from the official self-hosting config
+# (https://github.com/supabase/supabase/blob/master/docker/volumes/api/kong.yml) to the services
+# this stack runs: Auth, PostgREST and Studio. Routes for realtime, storage, edge functions,
+# GraphQL, OAuth/SAML callbacks and pg-meta are left out.
+#
+# Kong listens on two ports (see KONG_PROXY_LISTEN in docker-compose.yml):
+#   8000  the API the web app talks to: /auth/v1/* and /rest/v1/*, both require an API key
+#   3001  Supabase Studio, behind HTTP basic auth
+#
+# $NAMES are replaced with environment variables by kong-entrypoint.sh when the container starts,
+# so no secret is stored in this file.
+
+_format_version: "2.1"
+_transform: true
+
+# A consumer is a caller Kong can recognise. The `apikey` header selects one of the first two.
+consumers:
+  - username: anon
+    keyauth_credentials:
+      - key: $SUPABASE_ANON_KEY
+  - username: service_role
+    keyauth_credentials:
+      - key: $SUPABASE_SERVICE_KEY
+  - username: dashboard
+
+acls:
+  - consumer: anon
+    group: anon
+  - consumer: service_role
+    group: admin
+
+basicauth_credentials:
+  - consumer: dashboard
+    username: "$DASHBOARD_USERNAME"
+    password: "$DASHBOARD_PASSWORD"
+
+# Routes are matched with Kong's expression router; when several match, the highest priority wins.
+# Kong only checks that the API key is known. What the caller may then do is decided further
+# down: Auth and PostgREST verify the JWT themselves, and Postgres applies row level security.
+services:
+  # Links in confirmation and password-reset emails are opened by a browser without an API key.
+  - name: auth-v1-open
+    url: http://auth:9999/verify
+    routes:
+      - name: auth-v1-verify
+        expression: net.dst.port == 8000 && http.path ^= "/auth/v1/verify"
+        priority: 20
+        strip_path: true
+    plugins:
+      - name: cors
+
+  # Sign up, sign in, refresh, sign out, user admin.
+  - name: auth-v1
+    url: http://auth:9999/
+    routes:
+      - name: auth-v1-all
+        expression: net.dst.port == 8000 && http.path ^= "/auth/v1/"
+        priority: 10
+        strip_path: true
+    plugins:
+      - name: cors
+      - name: key-auth
+        config:
+          hide_credentials: false
+      - name: acl
+        config:
+          hide_groups_header: true
+          allow:
+            - admin
+            - anon
+
+  # The PostgREST root lists every table and column (OpenAPI), so it is for the service key only.
+  - name: rest-v1-openapi
+    url: http://rest:3000/
+    routes:
+      - name: rest-v1-openapi-root
+        expression: net.dst.port == 8000 && http.path == "/rest/v1/"
+        priority: 20
+        strip_path: true
+    plugins:
+      - name: cors
+      - name: key-auth
+        config:
+          hide_credentials: false
+      - name: acl
+        config:
+          hide_groups_header: true
+          allow:
+            - admin
+
+  # Tables and functions of the `public` schema as a REST API.
+  - name: rest-v1
+    url: http://rest:3000/
+    routes:
+      - name: rest-v1-all
+        expression: net.dst.port == 8000 && http.path ^= "/rest/v1/"
+        priority: 10
+        strip_path: true
+    plugins:
+      - name: cors
+      - name: key-auth
+        config:
+          hide_credentials: false
+      - name: acl
+        config:
+          hide_groups_header: true
+          allow:
+            - admin
+            - anon
+
+  # Studio has no login of its own, so everything on its port asks for the dashboard password.
+  - name: studio
+    url: http://studio:3000/
+    routes:
+      - name: studio-all
+        expression: net.dst.port == 3001
+        priority: 1
+    plugins:
+      - name: basic-auth
+        config:
+          hide_credentials: true

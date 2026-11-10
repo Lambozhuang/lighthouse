@@ -1,0 +1,332 @@
+# The whole Lighthouse stack on one machine.
+#
+#   python3 scripts/gen_secrets.py     # once: creates .env with generated secrets
+#   docker compose up -d               # build and start everything
+#   docker compose logs -f api worker  # follow the backend
+#   docker compose down                # stop (data is kept in named volumes)
+#   docker compose down -v             # stop and delete all data
+#
+# What runs (see docs/DEPLOY.md for URLs, logins and memory use):
+#
+#   Supabase, trimmed   db, auth, rest, kong, meta, studio
+#   Lighthouse          migrate (one-shot), api, worker, web
+#   Langfuse            included from docker-compose.langfuse.yml
+#
+# Published ports, all bound to BIND_ADDRESS (127.0.0.1 unless changed in .env):
+#
+#   3000  web app                  8000  Supabase gateway (auth + REST)
+#   8080  Lighthouse API           3001  Supabase Studio
+#   5432  Postgres                 3100  Langfuse
+#
+# Everything else is reachable only on the compose network. Secrets come from .env through
+# ${VARIABLE} interpolation; `${VAR:?message}` stops compose with that message if VAR is empty.
+
+name: lighthouse
+
+# Tracing is optional. To run without Langfuse (about 2 GB less memory), delete this block and
+# clear LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY in .env.
+include:
+  - docker-compose.langfuse.yml
+
+# One image for the three backend services; they differ only in the command they run.
+x-backend: &backend
+  image: ${COMPOSE_PROJECT_NAME}-backend
+  build:
+    context: .
+    dockerfile: docker/backend.Dockerfile
+  environment:
+    # Overrides of what .env holds for running on the host: inside compose the database and
+    # Langfuse are reached by service name. Connects as `postgres`, the owner of the tables;
+    # per request the API switches to the `authenticated` role (see src/lighthouse/db.py).
+    DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?run scripts/gen_secrets.py}@db:5432/postgres
+    # The same secret `auth` signs access tokens with, so the API can verify them.
+    JWT_SECRET: ${JWT_SECRET:?run scripts/gen_secrets.py}
+    LANGFUSE_HOST: http://langfuse-web:3000
+    # Passed through from .env unchanged; unset here means the default in src/lighthouse/config.py.
+    LIGHTHOUSE_MODEL:
+    LIGHTHOUSE_DISTILL_MODEL:
+    LIGHTHOUSE_EMBEDDING_MODEL:
+    ANTHROPIC_API_KEY:
+    OPENROUTER_API_KEY:
+    LANGFUSE_PUBLIC_KEY:
+    LANGFUSE_SECRET_KEY:
+    CORS_ORIGINS:
+
+services:
+  # ---------------------------------------------------------------------------------------------
+  # Supabase. Based on https://github.com/supabase/supabase/blob/master/docker/docker-compose.yml
+  # (image versions as of 2026-11-05) without realtime, storage, imgproxy, edge functions,
+  # analytics, vector and the supavisor pooler.
+  # ---------------------------------------------------------------------------------------------
+
+  # Postgres 17 with pgvector and the Supabase roles (anon, authenticated, service_role, ...).
+  db:
+    image: supabase/postgres:17.6.1.136
+    restart: unless-stopped
+    ports:
+      - ${BIND_ADDRESS:-127.0.0.1}:5432:5432
+    environment:
+      POSTGRES_HOST: /var/run/postgresql
+      PGPORT: 5432
+      POSTGRES_PORT: 5432
+      PGDATABASE: postgres
+      POSTGRES_DB: postgres
+      PGPASSWORD: ${POSTGRES_PASSWORD:?run scripts/gen_secrets.py}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run scripts/gen_secrets.py}
+      JWT_EXP: ${JWT_EXPIRY:-3600}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      # Keeps the pgsodium encryption key across restarts.
+      - db-config:/etc/postgresql-custom
+      # Run once on an empty data volume, as superuser.
+      - ./infra/supabase/db/roles.sql:/docker-entrypoint-initdb.d/init-scripts/99-roles.sql:ro
+      - ./infra/supabase/db/jwt.sql:/docker-entrypoint-initdb.d/init-scripts/99-jwt.sql:ro
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    healthcheck:
+      # Over TCP on purpose: during first-time initialisation Postgres only listens on its
+      # socket, so this turns healthy only when the init scripts are done.
+      test: ["CMD", "pg_isready", "-U", "postgres", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Supabase Auth (GoTrue): sign up / sign in with email and password, issues the JWTs.
+  # Creates and migrates the `auth` schema on start; healthy means that is done.
+  auth:
+    image: supabase/gotrue:v2.197.0
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: 9999
+      API_EXTERNAL_URL: ${VITE_SUPABASE_URL:-http://localhost:8000}/auth/v1
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@db:5432/postgres
+      GOTRUE_SITE_URL: ${SITE_URL:-http://localhost:3000}
+      GOTRUE_DISABLE_SIGNUP: ${DISABLE_SIGNUP:-false}
+      GOTRUE_JWT_SECRET: ${JWT_SECRET:?run scripts/gen_secrets.py}
+      GOTRUE_JWT_EXP: ${JWT_EXPIRY:-3600}
+      GOTRUE_JWT_ISSUER: ${VITE_SUPABASE_URL:-http://localhost:8000}/auth/v1
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
+      GOTRUE_EXTERNAL_PHONE_ENABLED: "false"
+      GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED: "false"
+      # No SMTP server here: new accounts are confirmed immediately instead of by email.
+      # Before exposing sign-up to anyone else, configure GOTRUE_SMTP_* and set this to false.
+      GOTRUE_MAILER_AUTOCONFIRM: "true"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9999/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # PostgREST: the `public` schema as a REST API, subject to row level security. Lighthouse's
+  # own API does not use it (it talks to Postgres directly); Studio and supabase-js can.
+  rest:
+    image: postgrest/postgrest:v14.18
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD}@db:5432/postgres
+      # Only `public` is exposed. The `lighthouse` schema (migration bookkeeping, chat
+      # checkpoints) and `auth` are not reachable through the REST API.
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_EXTRA_SEARCH_PATH: public
+      PGRST_DB_MAX_ROWS: 1000
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+      PGRST_APP_SETTINGS_JWT_EXP: ${JWT_EXPIRY:-3600}
+      PGRST_ADMIN_SERVER_HOST: localhost
+      PGRST_ADMIN_SERVER_PORT: 3001
+    command: ["postgrest"]
+    healthcheck:
+      test: ["CMD", "postgrest", "--ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # Kong: the single entry point. Port 8000 routes /auth/v1 and /rest/v1 and checks the API
+  # key; port 3001 serves Studio behind basic auth. Routes: infra/supabase/kong.yml.
+  kong:
+    image: kong/kong:3.9.3
+    restart: unless-stopped
+    depends_on:
+      auth:
+        condition: service_healthy
+      rest:
+        condition: service_healthy
+    ports:
+      - ${BIND_ADDRESS:-127.0.0.1}:8000:8000
+      - ${BIND_ADDRESS:-127.0.0.1}:3001:3001
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /usr/local/kong/kong.yml
+      KONG_PROXY_LISTEN: 0.0.0.0:8000, 0.0.0.0:3001
+      KONG_ROUTER_FLAVOR: expressions
+      KONG_DNS_ORDER: LAST,A,CNAME
+      KONG_DNS_NOT_FOUND_TTL: 1
+      KONG_DNS_VALID_TTL: 5
+      KONG_PLUGINS: cors,key-auth,acl,basic-auth
+      KONG_NGINX_PROXY_PROXY_BUFFER_SIZE: 160k
+      KONG_NGINX_PROXY_PROXY_BUFFERS: 64 160k
+      # Kong starts one worker per CPU core by default; one is plenty here and saves memory.
+      KONG_NGINX_WORKER_PROCESSES: 1
+      # Substituted into kong.yml by the entrypoint.
+      SUPABASE_ANON_KEY: ${ANON_KEY:?run scripts/gen_secrets.py}
+      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY:?run scripts/gen_secrets.py}
+      DASHBOARD_USERNAME: ${DASHBOARD_USERNAME:-lighthouse}
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:?run scripts/gen_secrets.py}
+    volumes:
+      - ./infra/supabase/kong.yml:/home/kong/kong.template.yml:ro
+      - ./infra/supabase/kong-entrypoint.sh:/home/kong/kong-entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/home/kong/kong-entrypoint.sh"]
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # postgres-meta: an HTTP API over the Postgres catalog. Studio uses it to list and edit tables.
+  meta:
+    image: supabase/postgres-meta:v0.100.0
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PG_META_PORT: 8080
+      PG_META_DB_HOST: db
+      PG_META_DB_PORT: 5432
+      PG_META_DB_NAME: postgres
+      PG_META_DB_USER: postgres
+      PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      CRYPTO_KEY: ${PG_META_CRYPTO_KEY:?run scripts/gen_secrets.py}
+
+  # Supabase Studio: table editor, SQL editor, user management. Reached through kong on 3001.
+  # Logs/analytics pages are switched off because the analytics service is not part of this stack.
+  studio:
+    image: supabase/studio:2026.11.02-sha-a05e7ec
+    restart: unless-stopped
+    depends_on:
+      meta:
+        condition: service_started
+      db:
+        condition: service_healthy
+    environment:
+      HOSTNAME: 0.0.0.0
+      STUDIO_PG_META_URL: http://meta:8080
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_USER_READ_WRITE: postgres
+      PG_META_CRYPTO_KEY: ${PG_META_CRYPTO_KEY}
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_MAX_ROWS: 1000
+      PGRST_DB_EXTRA_SEARCH_PATH: public
+      DEFAULT_ORGANIZATION_NAME: Lighthouse
+      DEFAULT_PROJECT_NAME: Lighthouse
+      SUPABASE_URL: http://kong:8000
+      SUPABASE_PUBLIC_URL: ${VITE_SUPABASE_URL:-http://localhost:8000}
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      AUTH_JWT_SECRET: ${JWT_SECRET}
+      ENABLED_FEATURES_LOGS_ALL: "false"
+      SNIPPETS_MANAGEMENT_FOLDER: /app/snippets
+    volumes:
+      # SQL snippets saved in the Studio SQL editor.
+      - studio-snippets:/app/snippets
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e "fetch('http://localhost:3000/api/platform/profile').then((r) => {if (r.status !== 200) throw new Error(r.status)})"
+      interval: 5s
+      timeout: 10s
+      retries: 6
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------------------------
+  # Lighthouse
+  # ---------------------------------------------------------------------------------------------
+
+  # Applies supabase/migrations/*.sql once each, then exits. Waits for `auth` because the
+  # tables reference auth.users, which Auth creates on its first start.
+  migrate:
+    <<: *backend
+    command: ["python", "-m", "lighthouse.migrate"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+      auth:
+        condition: service_healthy
+
+  # The HTTP API the web app calls.
+  api:
+    <<: *backend
+    command: ["uvicorn", "lighthouse.main:app", "--host", "0.0.0.0", "--port", "8080"]
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - ${BIND_ADDRESS:-127.0.0.1}:8080:8080
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://localhost:8080/api/health", timeout=3)
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+
+  # Background worker: turns inbox items into notes (fetch, distill, chunk, embed).
+  worker:
+    <<: *backend
+    command: ["python", "-m", "lighthouse.worker"]
+    restart: unless-stopped
+    # On SIGTERM the worker finishes the item it is on (a fetch plus two model calls).
+    stop_grace_period: 90s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # The web app: a static build served by Caddy. The VITE_* values are compiled into the
+  # JavaScript bundle, so they must be the URLs the *browser* uses, not compose service names.
+  web:
+    image: ${COMPOSE_PROJECT_NAME}-web
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8080}
+        VITE_SUPABASE_URL: ${VITE_SUPABASE_URL:-http://localhost:8000}
+        # The anon key is public by design: it only identifies the `anon` role.
+        VITE_SUPABASE_ANON_KEY: ${ANON_KEY}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+      kong:
+        condition: service_healthy
+    ports:
+      - ${BIND_ADDRESS:-127.0.0.1}:3000:80
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:80/"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+volumes:
+  db-data:
+  db-config:
+  studio-snippets:
