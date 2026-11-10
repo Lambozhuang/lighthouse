@@ -155,8 +155,9 @@ services:
       timeout: 5s
       retries: 12
 
-  # Kong: the single entry point. Port 8000 routes /auth/v1 and /rest/v1 and checks the API
-  # key; port 3001 serves Studio behind basic auth. Routes: infra/supabase/kong.yml.
+  # Kong: the single entry point. /auth/v1 and /rest/v1 need the API key; every other path is
+  # Studio behind basic auth. Port 8000 is the one the web app uses, 3001 the one to open Studio
+  # on. Routes: infra/supabase/kong.yml.
   kong:
     image: kong/kong:3.9.3
     restart: unless-stopped

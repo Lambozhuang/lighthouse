@@ -9,6 +9,12 @@
 #   8000  the API the web app talks to: /auth/v1/* and /rest/v1/*, both require an API key
 #   3001  Supabase Studio, behind HTTP basic auth
 #
+# The routes below match on the path only, so both ports answer the same way: /auth/v1/* and
+# /rest/v1/* go to the API, every other path goes to Studio and asks for the dashboard password
+# (the layout of the official config). They deliberately do not match on the port: Kong's
+# `net.dst.port` is the port in the request's Host header, not the port Kong listens on, so a
+# port rule stops matching as soon as the host port is remapped or a tunnel uses another number.
+#
 # $NAMES are replaced with environment variables by kong-entrypoint.sh when the container starts,
 # so no secret is stored in this file.
 
@@ -45,7 +51,7 @@ services:
     url: http://auth:9999/verify
     routes:
       - name: auth-v1-verify
-        expression: net.dst.port == 8000 && http.path ^= "/auth/v1/verify"
+        expression: http.path ^= "/auth/v1/verify"
         priority: 20
         strip_path: true
     plugins:
@@ -56,7 +62,7 @@ services:
     url: http://auth:9999/
     routes:
       - name: auth-v1-all
-        expression: net.dst.port == 8000 && http.path ^= "/auth/v1/"
+        expression: http.path ^= "/auth/v1/"
         priority: 10
         strip_path: true
     plugins:
@@ -76,7 +82,7 @@ services:
     url: http://rest:3000/
     routes:
       - name: rest-v1-openapi-root
-        expression: net.dst.port == 8000 && http.path == "/rest/v1/"
+        expression: http.path == "/rest/v1/"
         priority: 20
         strip_path: true
     plugins:
@@ -95,7 +101,7 @@ services:
     url: http://rest:3000/
     routes:
       - name: rest-v1-all
-        expression: net.dst.port == 8000 && http.path ^= "/rest/v1/"
+        expression: http.path ^= "/rest/v1/"
         priority: 10
         strip_path: true
     plugins:
@@ -110,12 +116,13 @@ services:
             - admin
             - anon
 
-  # Studio has no login of its own, so everything on its port asks for the dashboard password.
+  # Studio has no login of its own, so every path that is not an API path asks for the
+  # dashboard password. Lowest priority: it only answers what no route above matched.
   - name: studio
     url: http://studio:3000/
     routes:
       - name: studio-all
-        expression: net.dst.port == 3001
+        expression: http.path ^= "/"
         priority: 1
     plugins:
       - name: basic-auth
