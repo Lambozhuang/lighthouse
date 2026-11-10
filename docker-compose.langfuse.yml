@@ -73,7 +73,7 @@ services:
     restart: unless-stopped
     depends_on: *langfuse-depends-on
     ports:
-      - ${BIND_ADDRESS:-127.0.0.1}:3100:3000
+      - ${BIND_ADDRESS:-127.0.0.1}:${LANGFUSE_PORT:-3100}:3000
     environment:
       <<: *langfuse-env
       NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:?run scripts/gen_secrets.py}

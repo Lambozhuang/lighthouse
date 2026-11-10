@@ -18,6 +18,9 @@
 #   8080  Lighthouse API           3001  Supabase Studio
 #   5432  Postgres                 3100  Langfuse
 #
+# If one of these is taken on the host, set WEB_PORT, API_PORT, GATEWAY_PORT, STUDIO_PORT,
+# DB_PORT or LANGFUSE_PORT in .env. Only the host side changes; containers keep their ports.
+#
 # Everything else is reachable only on the compose network. Secrets come from .env through
 # ${VARIABLE} interpolation; `${VAR:?message}` stops compose with that message if VAR is empty.
 
@@ -64,7 +67,7 @@ services:
     image: supabase/postgres:17.6.1.136
     restart: unless-stopped
     ports:
-      - ${BIND_ADDRESS:-127.0.0.1}:5432:5432
+      - ${BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-5432}:5432
     environment:
       POSTGRES_HOST: /var/run/postgresql
       PGPORT: 5432
@@ -163,8 +166,8 @@ services:
       rest:
         condition: service_healthy
     ports:
-      - ${BIND_ADDRESS:-127.0.0.1}:8000:8000
-      - ${BIND_ADDRESS:-127.0.0.1}:3001:3001
+      - ${BIND_ADDRESS:-127.0.0.1}:${GATEWAY_PORT:-8000}:8000
+      - ${BIND_ADDRESS:-127.0.0.1}:${STUDIO_PORT:-3001}:3001
     environment:
       KONG_DATABASE: "off"
       KONG_DECLARATIVE_CONFIG: /usr/local/kong/kong.yml
@@ -277,7 +280,7 @@ services:
       migrate:
         condition: service_completed_successfully
     ports:
-      - ${BIND_ADDRESS:-127.0.0.1}:8080:8080
+      - ${BIND_ADDRESS:-127.0.0.1}:${API_PORT:-8080}:8080
     healthcheck:
       test:
         - CMD
@@ -319,7 +322,7 @@ services:
       kong:
         condition: service_healthy
     ports:
-      - ${BIND_ADDRESS:-127.0.0.1}:3000:80
+      - ${BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-3000}:80
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:80/"]
       interval: 10s
