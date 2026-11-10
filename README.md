@@ -9,6 +9,16 @@ ask a question later and an agent answers from your notes, citing the ones it us
 |---|---|
 | ![Inbox](docs/screenshots/inbox.jpg) | ![Note](docs/screenshots/note.jpg) |
 
+## Why I built it
+
+I save links and scribble notes all day and almost never go back to sort them. I wanted
+something on a small server at home that does the filing for me, so that weeks later I can ask
+"what did I conclude about X?" and get an answer that points at where it came from. It is also
+how I am learning the agent stack: by building something I want to use.
+
+The name is borrowed from the Lighthouse, the base in *Agents of S.H.I.E.L.D.* The agents inside
+it will get names from the show too.
+
 ## How it works
 
 ```mermaid
@@ -62,7 +72,8 @@ and merges the two rankings with reciprocal rank fusion
 - **The agent never reads raw web pages.** Fetched text is untrusted input. It is distilled by a
   separate model call that has no tools, and the chat agent is only shown the distilled fields.
   Source chunks are still embedded and searched, so recall does not suffer, but a page saying
-  "ignore your instructions" never reaches a model that can act.
+  "ignore your instructions" never reaches a model that can act. The cost is detail: an answer
+  cannot quote something the distill step left out.
 - **Fetching links is guarded against server-side request forgery.** The fetcher resolves the
   host, refuses private, loopback and link-local addresses, connects to the address it checked,
   and re-checks on every redirect ([`fetch.py`](src/lighthouse/ingest/fetch.py)).
@@ -72,6 +83,40 @@ and merges the two rankings with reciprocal rank fusion
   models are three environment variables.
 - **Every model call is traced.** A chat turn or a distill run is one Langfuse trace showing the
   model calls, tool calls, inputs, outputs and cost.
+
+## Trade-offs
+
+What I considered instead, and what each choice cost:
+
+- **Notes are rows in Postgres, not Markdown files in a git repository.** Markdown in git was
+  the first plan: readable anywhere, with history for free. But search, per-user isolation and
+  the job queue all wanted a database. This gives up git history and editing notes in any
+  editor; a Markdown export may come later.
+- **Supabase is self-hosted, not the cloud service.** The project is meant to run on my own
+  server. The price is six more containers to run and keep updated.
+- **Search is one SQL function, not a retrieval framework.** LlamaIndex was the alternative. For
+  short notes, one function that can be read top to bottom was enough; I plan to use LlamaIndex
+  for a paper library, where documents are long.
+- **The web app is a Vite single-page app, not Next.js.** Nothing here needs server-side
+  rendering, and static files behind Caddy are lighter to host on a small server.
+- **Links are fetched with plain HTTP and text extraction, not a headless browser.** That covers
+  ordinary articles without another service to run, and fails on pages that need JavaScript.
+- **Two models, not one.** Chat decides when and what to search and has to cite correctly, so it
+  gets the stronger model; distilling is a fixed-structure task and gets the cheaper one.
+- **The embedding size is fixed in the schema.** The column is `vector(1536)`. Changing the
+  embedding model later means a migration and re-embedding every note.
+
+## How it was built
+
+It started as an agent loop written by hand against the raw Anthropic SDK, then rewritten in
+LangGraph to see what the framework adds ([`playground/`](playground)).
+
+The notes feature was then built in one push with [Claude Code](https://claude.com/claude-code).
+I decided what to build, the stack, and the trade-offs above. Four agents implemented it in
+parallel, each in its own git worktree: ingest, the chat agent, the web app, and the
+infrastructure. Their branches were merged and run end to end against the real stack. A separate
+agent then reviewed the result, mainly for leaked secrets and cross-user data access, and the
+two issues it found were fixed. Commits carry a `Co-Authored-By: Claude` line.
 
 ## Stack
 
