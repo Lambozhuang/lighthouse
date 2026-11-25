@@ -34,6 +34,10 @@ for the commands on this page.
 
 All values are in `.env`; for example `grep DASHBOARD_ .env` shows the Studio login.
 
+If one of these ports is already taken on the machine, set `WEB_PORT`, `API_PORT`,
+`GATEWAY_PORT`, `STUDIO_PORT`, `DB_PORT` or `LANGFUSE_PORT` in `.env` and use the new number
+in the URLs further down.
+
 Langfuse starts with an organisation and a project called `lighthouse` already created, and
 with the API key pair from `.env` (`LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`), so the backend
 traces to it without any setup in the UI.
@@ -43,20 +47,18 @@ Ports are bound to `127.0.0.1`. Nothing is reachable from another machine until 
 
 ## The first app user
 
-App users live in Supabase Auth. There is no mail server in this setup, so a new account is
-confirmed immediately. Either use the sign-up form of the web app, or:
+App users live in Supabase Auth. There is no sign-up form and the sign-up endpoint is closed
+(`DISABLE_SIGNUP=true`, the default): Lighthouse is for its owner and whoever they add. Create an
+account on the machine that runs the stack:
 
 ```sh
-curl -s http://localhost:8000/auth/v1/signup \
-  -H "apikey: $(grep '^ANON_KEY=' .env | cut -d= -f2)" \
-  -H 'Content-Type: application/json' \
-  -d '{"email": "you@example.com", "password": "a-long-password"}'
+python3 scripts/create_user.py         # or: make user
 ```
 
-or in Studio: Authentication, Users, Add user.
-
-Once your account exists, close sign-up: set `DISABLE_SIGNUP=true` in `.env` and run
-`docker compose up -d auth`. More users can still be added from Studio.
+It asks for an email and a password (typed without echo) and creates the account through the
+Auth admin API on localhost, using the service key from `.env`. Run it again for each further
+user; every user only ever sees their own notes. Accounts can also be added, listed and deleted
+in Studio: Authentication, Users.
 
 ## Everyday commands
 
@@ -131,11 +133,47 @@ order:
   browser on the other device uses, e.g. `http://server.lan:8080`. The two `VITE_` values are
   compiled into the web app: run `docker compose up -d --build` after changing them.
 - `CORS_ORIGINS` must list the web app's URL, e.g. `'["http://server.lan:3000"]'`.
-- Set `DISABLE_SIGNUP=true`.
 
 With `BIND_ADDRESS=0.0.0.0` Postgres (5432) is published too. On a network you do not fully
 trust, remove the `ports:` entry of `db` or firewall it. Everything here is plain HTTP; for
 access from outside the home network put a TLS reverse proxy or a VPN in front.
+
+**One hostname behind a reverse proxy.** This is the tidier setup when the server already runs
+a proxy with TLS, and it needs no CORS because the browser only ever talks to one origin. Keep
+`BIND_ADDRESS=127.0.0.1` and let the proxy split by path. With Caddy on the host and the default
+ports:
+
+```
+lighthouse.example.com {
+    handle /api/* {
+        reverse_proxy 127.0.0.1:8080
+    }
+    handle /auth/v1/* {
+        reverse_proxy 127.0.0.1:8000
+    }
+    handle {
+        reverse_proxy 127.0.0.1:3000
+    }
+}
+```
+
+In `.env`, set `VITE_API_URL`, `VITE_SUPABASE_URL` and `SITE_URL` all to
+`https://lighthouse.example.com`, then `docker compose up -d --build`. The web app only uses the
+sign-in endpoints of the gateway, so `/rest/v1` does not need to be forwarded. To keep the site
+private to a VPN, reject other sources in the proxy; in Caddy, for a Tailscale network:
+
+```
+    @outside not remote_ip 100.64.0.0/10 fd7a:115c:a1e0::/48 127.0.0.1 ::1
+    respond @outside 403
+```
+
+Studio and Langfuse stay on localhost in this setup. Open them through an SSH tunnel, using the
+same port numbers on both ends, because Langfuse sends the browser to the URL in
+`LANGFUSE_PUBLIC_URL` when you sign in:
+
+```sh
+ssh -L 3001:localhost:3001 -L 3100:localhost:3100 your-server
+```
 
 ## When something goes wrong
 

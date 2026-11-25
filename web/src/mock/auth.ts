@@ -37,10 +37,6 @@ export function createMockAuth(): AuthClient {
     },
     getAccessToken: async () => (email ? 'mock-access-token' : null),
     signIn,
-    async signUp(nextEmail, password) {
-      await signIn(nextEmail, password)
-      return { signedIn: true }
-    },
     async signOut() {
       setEmail(null)
     },

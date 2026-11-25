@@ -1,12 +1,15 @@
 # Shortcuts for the commands in docs/DEPLOY.md and the CI workflow. `make help` lists them.
 
-.PHONY: help secrets up down reset logs ps build migrate test lint format web-check
+.PHONY: help secrets user up down reset logs ps build migrate test lint format web-check
 
 help:  ## Show this list
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  make %-10s %s\n", $$1, $$2}'
 
 secrets:  ## Create .env and fill in missing generated secrets (prints names only)
 	python3 scripts/gen_secrets.py
+
+user:  ## Create an app user (asks for email and password)
+	python3 scripts/create_user.py
 
 up: secrets  ## Build and start the whole stack
 	docker compose up -d --build

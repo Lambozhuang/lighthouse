@@ -28,12 +28,6 @@ export function createSupabaseAuth(url: string, anonKey: string): AuthClient {
       if (error) throw new Error(error.message)
     },
 
-    async signUp(email, password) {
-      const { data, error } = await supabase.auth.signUp({ email, password })
-      if (error) throw new Error(error.message)
-      return { signedIn: data.session !== null }
-    },
-
     async signOut() {
       // "local" ends the session in this browser only, not on other devices.
       await supabase.auth.signOut({ scope: 'local' })

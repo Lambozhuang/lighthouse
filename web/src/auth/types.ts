@@ -15,7 +15,5 @@ export interface AuthClient {
   /** The token to send as `Authorization: Bearer`, refreshed if it had expired. */
   getAccessToken(): Promise<string | null>
   signIn(email: string, password: string): Promise<void>
-  /** `signedIn` is false when the account must be confirmed by email first. */
-  signUp(email: string, password: string): Promise<{ signedIn: boolean }>
   signOut(): Promise<void>
 }

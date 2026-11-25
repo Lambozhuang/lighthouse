@@ -138,10 +138,11 @@ Needs Docker, Python 3, an Anthropic API key and an OpenRouter API key (for embe
 python3 scripts/gen_secrets.py   # creates .env with freshly generated secrets
 $EDITOR .env                     # set ANTHROPIC_API_KEY and OPENROUTER_API_KEY
 docker compose up -d --build
+python3 scripts/create_user.py   # asks for an email and a password
 ```
 
-Open http://localhost:3000, create an account, drop something into the inbox, then ask about
-it. Traces are at http://localhost:3100 and the database UI at http://localhost:3001; logins and
+Open http://localhost:3000, sign in, drop something into the inbox, then ask about it. There is
+no sign-up form: this is a tool for its owner, so accounts are created on the server. Traces are at http://localhost:3100 and the database UI at http://localhost:3001; logins and
 everything else are in [docs/DEPLOY.md](docs/DEPLOY.md). The whole stack idles at under 3 GB of
 memory, of which Langfuse is about half and can be left out.
 
