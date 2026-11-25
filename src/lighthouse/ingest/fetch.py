@@ -1,4 +1,8 @@
-"""Fetch a web page and pull out its main text.
+"""Fetch a web page (or a PDF) and pull out its main text.
+
+This is the plain way: one HTTP request, no browser. It is fast and enough for most articles.
+Pages that only show their text after running JavaScript come out empty here; `source.py` then
+hands them to the renderer (`render.py`).
 
 The URL comes from whoever dropped it, and the worker runs inside the home network. Without a
 guard, dropping `http://192.168.1.1/admin` or a cloud metadata address would make the worker read
@@ -17,21 +21,33 @@ needs a network-level rule (run the worker where it cannot reach the LAN), not m
 """
 
 import asyncio
+import io
 import ipaddress
+import re
 import socket
 from dataclasses import dataclass
 
 import httpx
 import trafilatura
+from pypdf import PdfReader
+from pypdf.errors import PyPdfError
 from trafilatura.settings import Document
 
 from lighthouse.ingest.errors import IngestError
 
 MAX_REDIRECTS = 5
 MAX_BYTES = 5 * 1024 * 1024  # counted after decompression
+MAX_PDF_BYTES = 20 * 1024 * 1024  # papers with figures are often larger than any web page
+# Stop reading a PDF once this much text is out: the pipeline keeps no more than this anyway
+# (pipeline.MAX_BODY_CHARS), and a 900-page book would otherwise take minutes of CPU.
+MAX_PDF_CHARS = 200_000
 TOTAL_TIMEOUT_SECONDS = 15  # for the whole download, redirects included
 MIN_TEXT_CHARS = 200  # less than this is a cookie banner or an empty app shell, not an article
 HTML_TYPES = {"text/html", "application/xhtml+xml"}
+PDF_TYPE = "application/pdf"
+# Some sites put small <script> elements in the middle of the article (one per timestamp, say).
+# The extractor would keep their code as if it were text, so they are cut out first.
+SCRIPT_OR_STYLE = re.compile(r"<(script|style)\b.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
 # A generic name: sites that turn away unknown clients mostly accept this form.
 USER_AGENT = "Mozilla/5.0 (compatible; notes-fetcher/0.1)"
 
@@ -60,6 +76,7 @@ class NetworkError(FetchError):
 class HttpStatusError(FetchError):
     def __init__(self, status: int) -> None:
         super().__init__(f"The site answered with an error (HTTP {status})")
+        self.status = status
         self.retryable = status == 429 or status >= 500  # rate limit or server trouble
 
 
@@ -109,7 +126,10 @@ async def _download(url: str, transport: httpx.AsyncBaseTransport | None) -> _Do
         transport=transport,
         timeout=10,
         trust_env=False,
-        headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml,text/plain;q=0.8"},
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/pdf;q=0.9,text/plain;q=0.8",
+        },
     ) as client:
         current = httpx.URL(url)
         for _ in range(MAX_REDIRECTS + 1):
@@ -131,11 +151,11 @@ async def _download(url: str, transport: httpx.AsyncBaseTransport | None) -> _Do
                 if not response.is_success:
                     raise HttpStatusError(response.status_code)
                 media_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
-                if media_type not in HTML_TYPES and media_type != "text/plain":
+                if media_type not in HTML_TYPES and media_type not in ("text/plain", PDF_TYPE):
                     raise UnsupportedContentError(
-                        f"Only web pages can be filed; this link is {media_type or 'an unknown kind of file'}"
+                        f"Only web pages and PDFs can be filed; this link is {media_type or 'an unknown kind of file'}"
                     )
-                body = await _read_capped(response)
+                body = await _read_capped(response, MAX_PDF_BYTES if media_type == PDF_TYPE else MAX_BYTES)
                 return _Download(str(current), media_type, response.charset_encoding, body)
         raise TooManyRedirectsError(f"The link redirects more than {MAX_REDIRECTS} times")
 
@@ -182,16 +202,18 @@ def is_public(address: str) -> bool:
     return not blocked
 
 
-async def _read_capped(response: httpx.Response) -> bytes:
+async def _read_capped(response: httpx.Response, limit: int) -> bytes:
     body = bytearray()
     async for chunk in response.aiter_bytes():
         body += chunk
-        if len(body) > MAX_BYTES:
-            raise PageTooLargeError(f"The page is larger than {MAX_BYTES // (1024 * 1024)} MB")
+        if len(body) > limit:
+            raise PageTooLargeError(f"The file is larger than {limit // (1024 * 1024)} MB")
     return bytes(body)
 
 
 def _extract(page: _Download) -> Page:
+    if page.media_type == PDF_TYPE:
+        return _extract_pdf(page)
     html = _decode(page.body, page.charset)
     title: str | None = None
     text = ""
@@ -201,7 +223,11 @@ def _extract(page: _Download) -> Page:
         # trafilatura keeps the article and drops navigation, ads and footers.
         # include_formatting gives Markdown (headings, lists) instead of flat text.
         document = trafilatura.bare_extraction(
-            html, url=page.url, with_metadata=True, include_formatting=True, include_comments=False
+            SCRIPT_OR_STYLE.sub("", html),
+            url=page.url,
+            with_metadata=True,
+            include_formatting=True,
+            include_comments=False,
         )
         if isinstance(document, Document):
             title, text = document.title, (document.text or "").strip()
@@ -210,6 +236,30 @@ def _extract(page: _Download) -> Page:
             "Could not find readable text on this page. It may need JavaScript or a login; paste the text instead"
         )
     return Page(url=page.url, title=title or None, text=text)
+
+
+def _extract_pdf(page: _Download) -> Page:
+    """Text of a PDF, page by page. A scanned PDF is pictures of text and gives nothing here."""
+    try:
+        reader = PdfReader(io.BytesIO(page.body))
+        if reader.is_encrypted:
+            raise ExtractionError("This PDF is password-protected")
+        title = reader.metadata.title if reader.metadata else None
+        parts: list[str] = []
+        length = 0
+        for pdf_page in reader.pages:
+            part = pdf_page.extract_text().strip()
+            if part:
+                parts.append(part)
+                length += len(part)
+            if length >= MAX_PDF_CHARS:
+                break
+    except PyPdfError as exc:
+        raise ExtractionError(f"Could not read this PDF ({type(exc).__name__})") from exc
+    text = "\n\n".join(parts)
+    if len(text) < MIN_TEXT_CHARS:
+        raise ExtractionError("Could not find text in this PDF. It may be a scan; paste the text instead")
+    return Page(url=page.url, title=(title or "").strip() or None, text=text)
 
 
 def _decode(body: bytes, charset: str | None) -> str:

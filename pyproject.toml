@@ -16,10 +16,12 @@ dependencies = [
     "psycopg[binary,pool]>=3.3.8",
     "pydantic-settings>=2.16.2",
     "pyjwt>=2.15.1",
+    "pypdf>=7.1.1",
     "python-dotenv>=1.0",
     "sse-starlette>=3.7.0",
     "trafilatura>=2.3.1",
     "uvicorn[standard]>=0.54.0",
+    "youtube-transcript-api>=1.2.5",
 ]
 
 [build-system]

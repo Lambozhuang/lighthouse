@@ -126,3 +126,33 @@ def sse_events(body: str) -> list[tuple[str, dict[str, Any]]]:
         if "event" in fields:
             events.append((fields["event"], json.loads(fields["data"])))
     return events
+
+
+def make_pdf(lines: Sequence[str], title: str | None = None) -> bytes:
+    """A one-page PDF that shows `lines` in Helvetica: the smallest file a PDF reader accepts."""
+
+    def literal(text: str) -> str:
+        return text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+    content = "BT /F1 12 Tf 72 720 Td 14 TL " + " ".join(f"({literal(line)}) Tj T*" for line in lines) + " ET"
+    objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+        "/Resources << /Font << /F1 5 0 R >> >> >>",
+        f"<< /Length {len(content)} >>\nstream\n{content}\nendstream",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    if title is not None:
+        objects.append(f"<< /Title ({literal(title)}) >>")
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += f"{number} 0 obj\n{body}\nendobj\n".encode("latin-1")
+    xref = len(out)
+    out += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode()
+    out += "".join(f"{offset:010d} 00000 n \n" for offset in offsets).encode()
+    info = " /Info 6 0 R" if title is not None else ""
+    out += f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R{info} >>\nstartxref\n{xref}\n%%EOF\n".encode()
+    return bytes(out)

@@ -1,11 +1,11 @@
-"""From one inbox item to one note: fetch (if it is a URL) → distill → chunk → embed → write."""
+"""From one inbox item to one note: read (if it is a URL) → distill → chunk → embed → write."""
 
 import logging
 from dataclasses import dataclass
 from uuid import UUID
 
 from lighthouse import db, llm
-from lighthouse.ingest import distill, fetch
+from lighthouse.ingest import distill, source
 from lighthouse.ingest.chunk import chunk_text
 from lighthouse.schemas import InboxKind
 
@@ -37,7 +37,7 @@ async def process(item: Item) -> UUID | None:
     retry. The slow steps (network, model calls) run before the database transaction opens.
     """
     if item.kind == "url":
-        page = await fetch.fetch_page(item.content)
+        page = await source.read_url(item.content)
         source_url, source_title, body = page.url, page.title, page.text
     else:
         source_url, source_title, body = None, None, item.content

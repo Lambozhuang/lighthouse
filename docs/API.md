@@ -38,8 +38,8 @@ type ChatMessage = { role: "user" | "assistant"; content: string; sources: Sourc
 ## Drop
 
 `POST /api/drop` returns immediately; a background worker turns the item into a note. If `content`
-is a single `http(s)://` URL (after trimming) the item is a `url` and the page is fetched,
-otherwise it is `text`. Poll `GET /api/inbox` to watch `status` move
+is a single `http(s)://` URL (after trimming) the item is a `url` and the link is read (a web
+page, a PDF, or the captions of a YouTube video), otherwise it is `text`. Poll `GET /api/inbox` to watch `status` move
 `pending → processing → done | failed`.
 
 ## Chat stream

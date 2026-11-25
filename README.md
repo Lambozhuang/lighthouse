@@ -34,6 +34,7 @@ flowchart LR
         db[("Postgres<br/>pgvector + RLS")]
     end
     models["Models via LiteLLM<br/>Claude, embeddings"]
+    renderer["Page renderer<br/>Crawl4AI"]
     langfuse["Langfuse<br/>traces"]
 
     web -- "sign in" --> auth
@@ -43,15 +44,22 @@ flowchart LR
     worker -- "claim jobs, write notes" --> db
     agent -- "hybrid search, checkpoints" --> db
     worker --> models
+    worker -- "pages that need JavaScript" --> renderer
     agent --> models
     worker -.-> langfuse
     agent -.-> langfuse
 ```
 
 **Drop flow.** `POST /api/drop` stores the item and returns at once. A worker claims it from
-Postgres (`FOR UPDATE SKIP LOCKED`, so the table is the job queue), fetches the page if it is a
-link, asks a model to distill it into a fixed structure (title, summary, key points, tags), splits
+Postgres (`FOR UPDATE SKIP LOCKED`, so the table is the job queue), reads the link if it is one,
+asks a model to distill it into a fixed structure (title, summary, key points, tags), splits
 the text into chunks, embeds them, and writes the note and its chunks in one transaction.
+
+**Reading a link** ([`source.py`](src/lighthouse/ingest/source.py)). A YouTube link becomes the
+video's captions. Anything else gets one plain HTTP request, which is enough for most articles
+and for PDFs. If that finds no text, or the site turns it away, the page is opened in a headless
+browser ([Crawl4AI](https://github.com/unclecode/crawl4ai), a separate container) and comes back
+as Markdown.
 
 **Chat flow.** The agent is a small explicit LangGraph graph: call the model, run the tools it
 asked for, loop until it answers. Its tools search the notes and read one note. Conversation
@@ -76,7 +84,9 @@ and merges the two rankings with reciprocal rank fusion
   cannot quote something the distill step left out.
 - **Fetching links is guarded against server-side request forgery.** The fetcher resolves the
   host, refuses private, loopback and link-local addresses, connects to the address it checked,
-  and re-checks on every redirect ([`fetch.py`](src/lighthouse/ingest/fetch.py)).
+  and re-checks on every redirect ([`fetch.py`](src/lighthouse/ingest/fetch.py)). The headless
+  browser follows redirects on its own, so it runs on a separate Docker network from which the
+  database and the other services cannot be reached.
 - **Postgres is the only stateful service the app needs.** Notes, vectors, the job queue and chat
   history all live there. No separate vector database, queue or cache to run and keep in sync.
 - **Models are configuration.** Every call goes through LiteLLM; the chat, distill and embedding
@@ -99,8 +109,10 @@ What I considered instead, and what each choice cost:
   for a paper library, where documents are long.
 - **The web app is a Vite single-page app, not Next.js.** Nothing here needs server-side
   rendering, and static files behind Caddy are lighter to host on a small server.
-- **Links are fetched with plain HTTP and text extraction, not a headless browser.** That covers
-  ordinary articles without another service to run, and fails on pages that need JavaScript.
+- **A plain HTTP request first, a headless browser only when that fails.** The first version had
+  no browser, and too many real pages came out empty: they are built with JavaScript. The
+  browser costs a 5.7 GB image and about 0.7 GB of memory, so it is the second attempt, not the
+  first; most articles never reach it and take about a second.
 - **Two models, not one.** Chat decides when and what to search and has to cite correctly, so it
   gets the stronger model; distilling is a fixed-structure task and gets the cheaper one.
 - **The embedding size is fixed in the schema.** The column is `vector(1536)`. Changing the
@@ -143,8 +155,8 @@ python3 scripts/create_user.py   # asks for an email and a password
 
 Open http://localhost:3000, sign in, drop something into the inbox, then ask about it. There is
 no sign-up form: this is a tool for its owner, so accounts are created on the server. Traces are at http://localhost:3100 and the database UI at http://localhost:3001; logins and
-everything else are in [docs/DEPLOY.md](docs/DEPLOY.md). The whole stack idles at under 3 GB of
-memory, of which Langfuse is about half and can be left out.
+everything else are in [docs/DEPLOY.md](docs/DEPLOY.md). The whole stack uses 3 to 4 GB of
+memory. Langfuse is about half of that and the page renderer about 0.7 GB; both can be left out.
 
 To see the web app alone with fake data: `cd web && pnpm install && pnpm dev:mock`.
 
@@ -164,7 +176,7 @@ cd web && pnpm install && pnpm lint && pnpm typecheck && pnpm test
 | Path | What |
 |---|---|
 | [`src/lighthouse/api/`](src/lighthouse/api) | HTTP routes: drop and inbox, notes, threads, chat stream |
-| [`src/lighthouse/ingest/`](src/lighthouse/ingest) | Fetch, distill, chunk, and the pipeline that ties them together |
+| [`src/lighthouse/ingest/`](src/lighthouse/ingest) | Read a link (fetch, PDF, YouTube captions, renderer), distill, chunk, and the pipeline that ties them together |
 | [`src/lighthouse/worker.py`](src/lighthouse/worker.py) | Background worker |
 | [`src/lighthouse/agent/`](src/lighthouse/agent) | The LangGraph graph, its tools and prompt |
 | [`src/lighthouse/retrieval.py`](src/lighthouse/retrieval.py) | Hybrid search, collapsed from chunks to notes |
@@ -176,8 +188,8 @@ cd web && pnpm install && pnpm lint && pnpm typecheck && pnpm test
 
 ## Limits and what is next
 
-- Pages that need JavaScript or a login cannot be fetched; the inbox says so and the text can be
-  pasted instead.
+- Pages behind a login or a paywall, sites that check for robots, scanned PDFs and videos
+  without captions cannot be read; the inbox says why and the text can be pasted instead.
 - The keyword half of search uses Postgres' `simple` text configuration, which does not segment
   Chinese; Chinese queries rely on the vector half.
 - On Claude Sonnet 5.5, an answer that follows a tool call can arrive in one piece rather than

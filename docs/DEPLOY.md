@@ -1,11 +1,11 @@
 # Running Lighthouse
 
 One `docker compose` project runs everything: a trimmed self-hosted Supabase (Postgres with
-pgvector, Auth, REST, gateway, Studio), the Lighthouse API, worker and web app, and a self-hosted
-Langfuse for tracing. Developed on macOS with OrbStack; the target is a small Ubuntu box.
+pgvector, Auth, REST, gateway, Studio), the Lighthouse API, worker and web app, a page renderer
+(Crawl4AI) and a self-hosted Langfuse for tracing. Developed on macOS with OrbStack; the target is a small Ubuntu box.
 
 You need Docker with Compose v2.20 or newer, Python 3 (only to generate the secrets), about
-8 GB of disk for images, and about 2.5 GB of free memory.
+14 GB of disk for images (the page renderer alone is 5.7 GB), and about 3.5 GB of free memory.
 
 ## First run
 
@@ -97,6 +97,7 @@ Idle, shortly after start, measured with `docker stats --no-stream` on an Apple 
 | `api` | same image | FastAPI on 8080 | 50 MB |
 | `worker` | same image | Turns inbox items into notes | about the same as `api` |
 | `web` | built from `docker/web.Dockerfile` | Caddy serving the static build | about 15 MB |
+| `crawl4ai` | `unclecode/crawl4ai:0.9.6` | Headless browser for pages that need JavaScript | 560 to 720 MB |
 | `langfuse-web` | `langfuse/langfuse:4.77.0` | Langfuse UI and API | 620 to 860 MB |
 | `langfuse-worker` | `langfuse/langfuse-worker:4.77.0` | Langfuse background jobs | 370 to 420 MB |
 | `langfuse-clickhouse` | `clickhouse/clickhouse-server:26.3.62.3` | Trace storage | 300 to 350 MB |
@@ -104,8 +105,10 @@ Idle, shortly after start, measured with `docker stats --no-stream` on an Apple 
 | `langfuse-minio` | `cgr.dev/chainguard/minio` | Object storage for raw events | 60 to 80 MB |
 | `langfuse-redis` | `redis:7` | Langfuse queues | 10 MB |
 
-Total: 2.2 to 2.3 GB, of which Langfuse is about 1.6 GB and everything else under 700 MB.
-Where a range is given, the two readings were taken a minute and ten minutes after start.
+Total: 2.8 to 3 GB, of which Langfuse is about 1.6 GB, the page renderer about 0.6 GB and
+everything else under 700 MB. Where a range is given, the two readings were taken a minute and
+ten minutes after start; for `crawl4ai`, after it had rendered a few pages. In use the numbers
+grow: with traces stored and a few items processed the same stack measured 3.9 GB.
 
 The `worker` and `web` rows are estimates: those two services were not part of the stack when
 the measurements were taken.
@@ -120,9 +123,12 @@ order:
    traces. A middle way is to keep it installed and start it only when you want to look at
    traces: `docker compose stop langfuse-web langfuse-worker langfuse-clickhouse` frees most
    of it.
-2. Studio and its catalog API, 350 MB: `docker compose stop studio meta`. Start them again
+2. The page renderer, about 0.6 GB (its limit is 2 GB): delete the `crawl4ai` service in
+   `docker-compose.yml` and add `RENDER_URL=` to `.env`. Articles, PDFs and YouTube links still
+   work; pages that need JavaScript fail with a message that says to paste the text.
+3. Studio and its catalog API, 350 MB: `docker compose stop studio meta`. Start them again
    when you need the admin UI; nothing else depends on them.
-3. The limits in `docker-compose.langfuse.yml` (`mem_limit`, `LANGFUSE_NODE_HEAP_MB`) and
+4. The limits in `docker-compose.langfuse.yml` (`mem_limit`, `LANGFUSE_NODE_HEAP_MB`) and
    `infra/langfuse/clickhouse-low-memory.xml` can be lowered further; they are set for comfort,
    not for the minimum.
 

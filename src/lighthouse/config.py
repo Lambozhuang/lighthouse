@@ -33,6 +33,11 @@ class Settings(BaseSettings):
 
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
 
+    # The page renderer (a Crawl4AI container) for pages that need JavaScript. Optional: with an
+    # empty URL such pages fail with a message that says to paste the text instead.
+    render_url: str = ""
+    render_token: str = Field(default="", repr=False)
+
     # Worker
     worker_poll_seconds: float = 2.0
     worker_max_attempts: int = 3

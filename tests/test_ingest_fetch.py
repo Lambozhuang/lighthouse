@@ -4,16 +4,16 @@ Nothing here touches the network. HTTP goes to an `httpx.MockTransport`, and DNS
 table the test fills in.
 """
 
-import ipaddress
-import socket
 from collections.abc import Callable
 
 import httpx
 import pytest
 
 from lighthouse.ingest import fetch
+from tests.helpers import make_pdf
 
-pytestmark = pytest.mark.asyncio(loop_scope="session")
+# Every test here gets the fake DNS from conftest.py, whether it names the fixture or not.
+pytestmark = [pytest.mark.asyncio(loop_scope="session"), pytest.mark.usefixtures("dns")]
 
 PUBLIC_IP = "93.184.216.34"
 ARTICLE = (
@@ -22,23 +22,6 @@ ARTICLE = (
     "</article><footer>Copyright</footer></body></html>"
 )
 real_resolve = fetch.resolve
-
-
-@pytest.fixture(autouse=True)
-def dns(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[str]]:
-    """Fake DNS. Tests add `hostname -> addresses`; an IP literal resolves to itself."""
-    table: dict[str, list[str]] = {}
-
-    async def resolve(host: str) -> list[str]:
-        if host in table:
-            return table[host]
-        try:
-            return [str(ipaddress.ip_address(host))]
-        except ValueError:
-            raise socket.gaierror(socket.EAI_NONAME, "unknown host") from None
-
-    monkeypatch.setattr(fetch, "resolve", resolve)
-    return table
 
 
 class Site:
@@ -222,11 +205,62 @@ async def test_page_without_readable_text(dns: dict[str, list[str]]) -> None:
         await fetch.fetch_page("https://app.example/", transport=Site(lambda request: html(shell)).transport)
 
 
-async def test_non_html_content_is_rejected(dns: dict[str, list[str]]) -> None:
+async def test_scripts_inside_the_article_are_not_text(dns: dict[str, list[str]]) -> None:
+    dns["blog.example"] = [PUBLIC_IP]
+    body = ARTICLE.replace("<p>", "<p><script nonce='x'>window.formatters?.run('id', {\"t\": 1});</script>")
+    page = await fetch.fetch_page("https://blog.example/sleep", transport=Site(lambda request: html(body)).transport)
+
+    assert "Sleep helps the brain" in page.text
+    assert "formatters" not in page.text
+
+
+def pdf(body: bytes) -> httpx.Response:
+    return httpx.Response(200, headers={"content-type": "application/pdf"}, content=body)
+
+
+async def test_pdf_text_is_extracted(dns: dict[str, list[str]]) -> None:
+    dns["papers.example"] = [PUBLIC_IP]
+    lines = ["Attention is all you need"] + [f"Line {n}: the transformer uses attention only." for n in range(12)]
+    body = make_pdf(lines, title="Attention Paper")
+    page = await fetch.fetch_page(
+        "https://papers.example/pdf/1706", transport=Site(lambda request: pdf(body)).transport
+    )
+
+    assert page.title == "Attention Paper"
+    assert "Attention is all you need" in page.text and "Line 11: the transformer" in page.text
+
+
+async def test_pdf_without_text_is_refused(dns: dict[str, list[str]]) -> None:
+    dns["papers.example"] = [PUBLIC_IP]
+    with pytest.raises(fetch.ExtractionError, match="scan"):  # a scanned page: nothing to extract
+        await fetch.fetch_page("https://papers.example/s.pdf", transport=Site(lambda r: pdf(make_pdf([]))).transport)
+
+
+async def test_broken_pdf_is_refused(dns: dict[str, list[str]]) -> None:
+    dns["papers.example"] = [PUBLIC_IP]
+    with pytest.raises(fetch.ExtractionError):
+        await fetch.fetch_page(
+            "https://papers.example/x.pdf", transport=Site(lambda r: pdf(b"%PDF-1.7 oops")).transport
+        )
+
+
+async def test_pdf_may_be_larger_than_a_page(dns: dict[str, list[str]], monkeypatch: pytest.MonkeyPatch) -> None:
+    dns["papers.example"] = [PUBLIC_IP]
+    body = make_pdf([f"Line {n}: text long enough to count as content." for n in range(30)])
+    monkeypatch.setattr(fetch, "MAX_BYTES", 100)  # the web page limit does not apply to PDFs
+    page = await fetch.fetch_page("https://papers.example/a.pdf", transport=Site(lambda request: pdf(body)).transport)
+    assert "Line 29" in page.text
+
+    monkeypatch.setattr(fetch, "MAX_PDF_BYTES", 100)
+    with pytest.raises(fetch.PageTooLargeError):
+        await fetch.fetch_page("https://papers.example/a.pdf", transport=Site(lambda request: pdf(body)).transport)
+
+
+async def test_other_files_are_rejected(dns: dict[str, list[str]]) -> None:
     dns["files.example"] = [PUBLIC_IP]
-    response = httpx.Response(200, headers={"content-type": "application/pdf"}, content=b"%PDF-1.7")
-    with pytest.raises(fetch.UnsupportedContentError, match="application/pdf"):
-        await fetch.fetch_page("https://files.example/paper.pdf", transport=Site(lambda request: response).transport)
+    response = httpx.Response(200, headers={"content-type": "image/png"}, content=b"\x89PNG")
+    with pytest.raises(fetch.UnsupportedContentError, match="image/png"):
+        await fetch.fetch_page("https://files.example/cat.png", transport=Site(lambda request: response).transport)
 
 
 async def test_oversized_page_is_rejected(dns: dict[str, list[str]], monkeypatch: pytest.MonkeyPatch) -> None:

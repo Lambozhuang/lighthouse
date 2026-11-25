@@ -90,6 +90,8 @@ GENERATED: list[tuple[str, Callable[[dict[str, str]], str]]] = [
     ("DATABASE_URL", lambda env: f"postgresql://postgres:{env['POSTGRES_PASSWORD']}@localhost:5432/postgres"),
     # Web app: the anon key is public by design, the browser needs it
     ("VITE_SUPABASE_ANON_KEY", lambda env: env["ANON_KEY"]),
+    # Page renderer: the token the worker presents to the Crawl4AI container
+    ("CRAWL4AI_API_TOKEN", lambda env: secrets.token_hex(32)),
     # Langfuse: the project key pair is provisioned on first start and used by the backend
     ("LANGFUSE_PUBLIC_KEY", lambda env: f"pk-lf-{uuid.uuid4()}"),
     ("LANGFUSE_SECRET_KEY", lambda env: f"sk-lf-{uuid.uuid4()}"),

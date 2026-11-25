@@ -6,7 +6,9 @@ Each test session creates its own throwaway database on that server, loads a sma
 stand-in (roles, auth.users, auth.uid()) and applies the real migrations.
 """
 
+import ipaddress
 import os
+import socket
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -43,6 +45,8 @@ def settings_env(database_url: str) -> None:
     os.environ["JWT_SECRET"] = TEST_JWT_SECRET
     os.environ["LANGFUSE_PUBLIC_KEY"] = ""
     os.environ["LANGFUSE_SECRET_KEY"] = ""
+    os.environ["RENDER_URL"] = ""  # tests that want the renderer switch it on themselves
+    os.environ["RENDER_TOKEN"] = ""
     from lighthouse.config import get_settings
 
     get_settings.cache_clear()
@@ -60,6 +64,25 @@ async def database(database_url: str, settings_env: None) -> AsyncIterator[None]
     yield
     await graph.close_agent()
     await db.close_pool()
+
+
+@pytest.fixture
+def dns(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[str]]:
+    """Fake DNS for the fetch code. Tests add `hostname -> addresses`; an IP literal resolves to itself."""
+    from lighthouse.ingest import fetch
+
+    table: dict[str, list[str]] = {}
+
+    async def resolve(host: str) -> list[str]:
+        if host in table:
+            return table[host]
+        try:
+            return [str(ipaddress.ip_address(host))]
+        except ValueError:
+            raise socket.gaierror(socket.EAI_NONAME, "unknown host") from None
+
+    monkeypatch.setattr(fetch, "resolve", resolve)
+    return table
 
 
 async def _create_user() -> UUID:

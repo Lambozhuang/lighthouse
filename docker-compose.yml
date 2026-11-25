@@ -10,6 +10,7 @@
 #
 #   Supabase, trimmed   db, auth, rest, kong, meta, studio
 #   Lighthouse          migrate (one-shot), api, worker, web
+#   Page renderer       crawl4ai (headless browser for pages that need JavaScript)
 #   Langfuse            included from docker-compose.langfuse.yml
 #
 # Published ports, all bound to BIND_ADDRESS (127.0.0.1 unless changed in .env):
@@ -45,6 +46,10 @@ x-backend: &backend
     # The same secret `auth` signs access tokens with, so the API can verify them.
     JWT_SECRET: ${JWT_SECRET:?run scripts/gen_secrets.py}
     LANGFUSE_HOST: http://langfuse-web:3000
+    # The page renderer. `${VAR-default}` (no colon) keeps an empty value from .env, and an
+    # empty RENDER_URL turns the renderer off.
+    RENDER_URL: ${RENDER_URL-http://crawl4ai:11235}
+    RENDER_TOKEN: ${CRAWL4AI_API_TOKEN:-}
     # Passed through from .env unchanged; unset here means the default in src/lighthouse/config.py.
     LIGHTHOUSE_MODEL:
     LIGHTHOUSE_DISTILL_MODEL:
@@ -303,6 +308,40 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+    # The only service that talks to the renderer. It does not wait for it: without the
+    # renderer, pages that need JavaScript fail with a message and everything else works.
+    networks:
+      - default
+      - render
+
+  # Page renderer: Crawl4AI (https://github.com/unclecode/crawl4ai), a headless Chromium behind
+  # an HTTP API. The worker sends it the pages its plain fetch cannot read, mostly pages built
+  # with JavaScript, and gets Markdown back (src/lighthouse/ingest/render.py).
+  #
+  # It opens whatever link was dropped, so it is kept apart: no published port, and a network
+  # of its own, from which it reaches the internet and the worker but not the database, the
+  # auth service or Langfuse.
+  #
+  # The heaviest single container: a 5.7 GB image and 600 to 800 MB of memory once a page has
+  # been rendered. To run without it, delete this service and set RENDER_URL= in .env.
+  crawl4ai:
+    image: unclecode/crawl4ai:0.9.6
+    restart: unless-stopped
+    environment:
+      # Without a token the server only listens inside its own container.
+      CRAWL4AI_API_TOKEN: ${CRAWL4AI_API_TOKEN:?run scripts/gen_secrets.py}
+    # Chromium keeps page data in /dev/shm; Docker's default of 64 MB makes it crash on large pages.
+    shm_size: 1g
+    mem_limit: 2g
+    networks:
+      - render
+    # Replaces the image's own check, which also fails when the host has under 2 GB of memory.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:11235/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
   # The web app: a static build served by Caddy. The VITE_* values are compiled into the
   # JavaScript bundle, so they must be the URLs the *browser* uses, not compose service names.
@@ -329,6 +368,10 @@ services:
       interval: 10s
       timeout: 5s
       retries: 6
+
+networks:
+  # Worker and renderer only; see the crawl4ai service.
+  render:
 
 volumes:
   db-data:
